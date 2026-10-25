@@ -330,15 +330,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise ValueError("Invalid document permission")
         with connect(config.database_path) as db:
             row = db.execute(
-                "SELECT d.id, d.original_name, d.storage_name, d.content_type FROM documents AS d "
-                "WHERE d.id = ? AND (d.owner_id = ? OR EXISTS (SELECT 1 FROM document_shares AS s "
-                f"WHERE s.document_id = d.id AND s.user_id = ? AND s.{permission} = 1 "
-                "AND s.revoked_at IS NULL AND (s.expires_at IS NULL OR s.expires_at > ?)))",
-                (document_id, user_id, user_id, utc_now()),
+                "SELECT d.id, d.owner_id, d.original_name, d.storage_name, d.content_type, "
+                "s.id AS share_id, s.can_view, s.can_download, s.expires_at, s.revoked_at "
+                "FROM documents AS d LEFT JOIN document_shares AS s "
+                "ON s.document_id = d.id AND s.user_id = ? WHERE d.id = ?",
+                (user_id, document_id),
             ).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Document not found")
-        return dict(row)
+            now = utc_now()
+            denial: tuple[int, str, str] | None = None
+            if row is None:
+                denial = (404, "Document not found", "document_not_found")
+            elif row["owner_id"] != user_id:
+                if row["share_id"] is None:
+                    # Keep the document-existence check private for unrelated users.
+                    denial = (404, "Document not found", "document_not_found")
+                elif row["revoked_at"] is not None:
+                    denial = (403, "This document share was revoked.", "share_revoked")
+                elif row["expires_at"] is not None and row["expires_at"] <= now:
+                    denial = (403, "This document share has expired.", "share_expired")
+                elif not row[permission]:
+                    action = "View" if permission == "can_view" else "Download"
+                    denial = (
+                        403,
+                        f"{action} permission was not granted for this document.",
+                        f"{permission.removeprefix('can_')}_permission_not_granted",
+                    )
+            if denial is not None:
+                status_code, detail, reason = denial
+                record_event(
+                    db,
+                    event_type="document_access_denied",
+                    actor_id=user_id,
+                    document_id=document_id,
+                    details=json.dumps({"permission": permission.removeprefix("can_"), "reason": reason}),
+                    created_at=now,
+                )
+            else:
+                return dict(row)
+        raise HTTPException(status_code=status_code, detail=detail)
 
     @app.get("/api/documents/{document_id}/view")
     async def view_document(document_id: str, user: dict = Depends(current_user)) -> Response:
