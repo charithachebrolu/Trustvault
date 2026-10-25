@@ -1,24 +1,21 @@
-# Render Blueprint for a same-origin frontend + FastAPI demo.
-# The paid web plan and persistent disk preserve SQLite and uploaded files.
+# Free Render Blueprint for a same-origin frontend + FastAPI demo.
+# The filesystem is temporary: the database and uploaded files can disappear
+# whenever Render restarts or redeploys this free service.
 services:
   - type: web
     name: trustvault-demo
     runtime: docker
-    plan: 0.5c-512mb
+    plan: free
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /health
-    disk:
-      name: trustvault-data
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
       - key: TRUSTVAULT_SECRET_KEY
         generateValue: true
       - key: TRUSTVAULT_DATABASE_PATH
-        value: /var/data/trustvault.db
+        value: /tmp/trustvault.db
       - key: TRUSTVAULT_STORAGE_DIR
-        value: /var/data/uploads
+        value: /tmp/trustvault-uploads
       - key: TRUSTVAULT_COOKIE_SECURE
         value: "true"
       - key: TRUSTVAULT_MAX_UPLOAD_BYTES
