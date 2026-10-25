@@ -52,6 +52,19 @@ npm run dev
 
 Open <http://127.0.0.1:5173>. The Vite development server proxies `/api` and `/health` to FastAPI at `127.0.0.1:8000`. SQLite and uploaded files live under `backend/` by default. The API initializes the database on startup. For a deployed HTTPS environment set `TRUSTVAULT_COOKIE_SECURE=true` and configure the allowed origins.
 
+## Deploy a public demo on Render
+
+The repository includes a Render Blueprint and Dockerfile. The Docker image builds the React app and serves it from FastAPI, so the website and API use the same public origin. This avoids a separate frontend/API proxy and cross-origin cookie setup.
+
+1. Push the project to GitHub and make sure the repository contains `render.yaml`, `Dockerfile`, and `.dockerignore`.
+2. Sign in to Render, choose **New → Blueprint**, connect the TrustVault GitHub repository, and select the branch to deploy.
+3. Review the resources before confirming. The Blueprint requests a paid `0.5c-512mb` web service and a 1 GB persistent disk. The disk keeps the SQLite database and uploaded files across restarts and deployments. Check [Render pricing](https://render.com/pricing) before applying it; do not continue if you do not want these resources or their charges.
+4. Render builds the frontend and API into one Docker image, generates `TRUSTVAULT_SECRET_KEY`, attaches storage at `/var/data`, and deploys the service. Wait until its status is **Live**.
+5. Open the service's public `https://…onrender.com` URL. Check `https://…onrender.com/health`; it should return `{"status":"ok","database":"ok"}`.
+6. In the public website, create two test accounts and use fake documents to check upload, sharing, view-only denial, audit activity, revocation, and download. Do not upload confidential or real personal files to this prototype.
+
+The deployment URL is created by Render; it will not be `127.0.0.1`. A deployment is not created until you connect the repository and apply the Blueprint in your Render account. Pushing a later commit to the deployed branch triggers a new deployment by default.
+
 ## Administrator account
 
 Create and sign in to the account that should administer TrustVault. In a third terminal, from `backend/`, promote that existing account:

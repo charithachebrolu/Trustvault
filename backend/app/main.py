@@ -12,7 +12,8 @@ from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.responses import Response
+from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse, Response
 
 from .config import Settings, settings_from_env
 from .database import connect, initialize_database, record_event
@@ -406,6 +407,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "WHERE actor_id = ? ORDER BY id DESC LIMIT 100", (user["id"],),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # In production the Docker image contains the compiled React app. Serving it
+    # from the API keeps the website and cookie-authenticated API same-origin.
+    frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    frontend_assets = frontend_dist / "assets"
+    if frontend_assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=frontend_assets), name="frontend-assets")
+    frontend_index = frontend_dist / "index.html"
+    if frontend_index.is_file():
+        @app.get("/", include_in_schema=False)
+        async def frontend_index_page() -> FileResponse:
+            return FileResponse(frontend_index)
 
     return app
 

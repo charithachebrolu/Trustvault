@@ -6,8 +6,11 @@ type DocumentItem = { id: string; original_name: string; content_type: string; s
 type ShareItem = { id: string; email: string; display_name: string; created_at: string; can_view: boolean; can_download: boolean; expires_at: string | null; revoked_at: string | null; status: 'active' | 'expired' | 'revoked' }
 type AuditItem = { id: number; event_type: string; document_id: string | null; details: string; created_at: string }
 
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '')
+const apiUrl = (path: string) => `${API_BASE_URL}${path}`
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, { ...init, credentials: 'include' })
+  const response = await fetch(apiUrl(path), { ...init, credentials: 'include' })
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as { detail?: string }
     throw new Error(body.detail ?? `Request failed (${response.status})`)
@@ -72,7 +75,7 @@ function App() {
   async function download(item: DocumentItem) {
     setError('')
     try {
-      const response = await fetch(`/api/documents/${item.id}/download`, { credentials: 'include' })
+      const response = await fetch(apiUrl(`/api/documents/${item.id}/download`), { credentials: 'include' })
       if (!response.ok) { const body = await response.json().catch(() => ({})) as { detail?: string }; throw new Error(body.detail ?? 'Download failed') }
       const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement('a')
       link.href = url; link.download = item.original_name; link.click(); URL.revokeObjectURL(url); await refresh()
@@ -83,7 +86,7 @@ function App() {
     setError('')
     const preview = window.open('about:blank', '_blank')
     try {
-      const response = await fetch(`/api/documents/${item.id}/view`, { credentials: 'include' })
+      const response = await fetch(apiUrl(`/api/documents/${item.id}/view`), { credentials: 'include' })
       if (!response.ok) {
         const body = await response.json().catch(() => ({})) as { detail?: string }
         throw new Error(body.detail ?? `View failed (${response.status})`)
