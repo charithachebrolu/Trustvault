@@ -55,6 +55,10 @@ def initialize_database(database_path: Path) -> None:
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 granted_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 created_at TEXT NOT NULL,
+                can_view INTEGER NOT NULL DEFAULT 1 CHECK(can_view IN (0, 1)),
+                can_download INTEGER NOT NULL DEFAULT 1 CHECK(can_download IN (0, 1)),
+                expires_at TEXT,
+                revoked_at TEXT,
                 UNIQUE(document_id, user_id)
             );
             CREATE INDEX IF NOT EXISTS idx_document_shares_user
@@ -73,6 +77,15 @@ def initialize_database(database_path: Path) -> None:
                 ON audit_events(document_id, created_at DESC);
             """
         )
+        share_columns = {row["name"] for row in db.execute("PRAGMA table_info(document_shares)")}
+        if "can_view" not in share_columns:
+            db.execute("ALTER TABLE document_shares ADD COLUMN can_view INTEGER NOT NULL DEFAULT 1")
+        if "can_download" not in share_columns:
+            db.execute("ALTER TABLE document_shares ADD COLUMN can_download INTEGER NOT NULL DEFAULT 1")
+        if "expires_at" not in share_columns:
+            db.execute("ALTER TABLE document_shares ADD COLUMN expires_at TEXT")
+        if "revoked_at" not in share_columns:
+            db.execute("ALTER TABLE document_shares ADD COLUMN revoked_at TEXT")
         user_columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
         if "role" not in user_columns:
             db.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")

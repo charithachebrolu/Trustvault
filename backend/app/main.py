@@ -30,7 +30,15 @@ ALLOWED_MIME = {
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def share_status(*, expires_at: str | None, revoked_at: str | None, now: str) -> str:
+    if revoked_at is not None:
+        return "revoked"
+    if expires_at is not None and expires_at <= now:
+        return "expired"
+    return "active"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -204,10 +212,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rows = db.execute(
                 "SELECT d.id, d.original_name, d.content_type, d.size_bytes, d.created_at, "
                 "CASE WHEN d.owner_id = ? THEN 1 ELSE 0 END AS is_owner, "
-                "(SELECT owner.display_name FROM users AS owner WHERE owner.id = d.owner_id) AS shared_by "
-                "FROM documents AS d WHERE d.owner_id = ? OR EXISTS ("
-                "SELECT 1 FROM document_shares AS s WHERE s.document_id = d.id AND s.user_id = ?) "
-                "ORDER BY d.created_at DESC", (user["id"], user["id"], user["id"]),
+                "(SELECT owner.display_name FROM users AS owner WHERE owner.id = d.owner_id) AS shared_by, "
+                "CASE WHEN d.owner_id = ? THEN 1 ELSE EXISTS (SELECT 1 FROM document_shares AS s "
+                "WHERE s.document_id = d.id AND s.user_id = ? AND s.can_view = 1 AND s.revoked_at IS NULL "
+                "AND (s.expires_at IS NULL OR s.expires_at > ?)) END AS can_view, "
+                "CASE WHEN d.owner_id = ? THEN 1 ELSE EXISTS (SELECT 1 FROM document_shares AS s "
+                "WHERE s.document_id = d.id AND s.user_id = ? AND s.can_download = 1 AND s.revoked_at IS NULL "
+                "AND (s.expires_at IS NULL OR s.expires_at > ?)) END AS can_download, "
+                "(SELECT s.expires_at FROM document_shares AS s WHERE s.document_id = d.id AND s.user_id = ? "
+                "AND s.revoked_at IS NULL ORDER BY s.created_at DESC LIMIT 1) AS expires_at "
+                "FROM documents AS d WHERE d.owner_id = ? OR EXISTS (SELECT 1 FROM document_shares AS s "
+                "WHERE s.document_id = d.id AND s.user_id = ? AND s.revoked_at IS NULL "
+                "AND (s.expires_at IS NULL OR s.expires_at > ?)) "
+                "ORDER BY d.created_at DESC",
+                (user["id"], user["id"], user["id"], now := utc_now(), user["id"], user["id"], now,
+                 user["id"], user["id"], user["id"], now),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -215,6 +234,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def create_share(
         document_id: str, payload: ShareInput, user: dict = Depends(current_user),
     ) -> dict:
+        now = utc_now()
+        expires_at = payload.expires_at.astimezone(timezone.utc).isoformat(timespec="microseconds") if payload.expires_at else None
+        if expires_at is not None and expires_at <= now:
+            raise HTTPException(status_code=422, detail="Expiry must be in the future")
         with connect(config.database_path) as db:
             document = db.execute(
                 "SELECT id FROM documents WHERE id = ? AND owner_id = ?", (document_id, user["id"]),
@@ -228,21 +251,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=404, detail="No TrustVault account uses that email yet")
             if recipient["id"] == user["id"]:
                 raise HTTPException(status_code=400, detail="You already have access to this document")
-            share_id, now = str(uuid.uuid4()), utc_now()
-            db.execute(
-                "INSERT OR IGNORE INTO document_shares(id, document_id, user_id, granted_by, created_at) "
-                "VALUES (?, ?, ?, ?, ?)", (share_id, document_id, recipient["id"], user["id"], now),
-            )
-            share = db.execute(
-                "SELECT id, created_at FROM document_shares WHERE document_id = ? AND user_id = ?",
+            existing = db.execute(
+                "SELECT id, revoked_at, expires_at FROM document_shares WHERE document_id = ? AND user_id = ?",
                 (document_id, recipient["id"]),
             ).fetchone()
+            if existing:
+                share_id = existing["id"]
+                db.execute(
+                    "UPDATE document_shares SET granted_by = ?, created_at = ?, can_view = ?, can_download = ?, "
+                    "expires_at = ?, revoked_at = NULL WHERE id = ?",
+                    (user["id"], now, int(payload.can_view), int(payload.can_download), expires_at, share_id),
+                )
+                event_type = "document_share_updated"
+            else:
+                share_id = str(uuid.uuid4())
+                db.execute(
+                    "INSERT INTO document_shares(id, document_id, user_id, granted_by, created_at, can_view, "
+                    "can_download, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (share_id, document_id, recipient["id"], user["id"], now, int(payload.can_view),
+                     int(payload.can_download), expires_at),
+                )
+                event_type = "document_shared"
             record_event(
-                db, event_type="document_shared", actor_id=user["id"], document_id=document_id,
-                details=json.dumps({"recipient_email": recipient["email"]}), created_at=now,
+                db, event_type=event_type, actor_id=user["id"], document_id=document_id,
+                details=json.dumps({"recipient_email": recipient["email"], "can_view": payload.can_view,
+                                    "can_download": payload.can_download, "expires_at": expires_at}),
+                created_at=now,
             )
-        return {"id": share["id"], "email": recipient["email"], "display_name": recipient["display_name"],
-                "created_at": share["created_at"]}
+        return {"id": share_id, "email": recipient["email"], "display_name": recipient["display_name"],
+                "created_at": now, "can_view": payload.can_view, "can_download": payload.can_download,
+                "expires_at": expires_at, "revoked_at": None, "status": "active"}
 
     @app.get("/api/documents/{document_id}/shares", response_model=list[ShareResponse])
     async def list_shares(document_id: str, user: dict = Depends(current_user)) -> list[dict]:
@@ -253,11 +291,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if owned is None:
                 raise HTTPException(status_code=404, detail="Document not found")
             rows = db.execute(
-                "SELECT s.id, u.email, u.display_name, s.created_at FROM document_shares AS s "
+                "SELECT s.id, u.email, u.display_name, s.created_at, s.can_view, s.can_download, "
+                "s.expires_at, s.revoked_at FROM document_shares AS s "
                 "JOIN users AS u ON u.id = s.user_id WHERE s.document_id = ? ORDER BY s.created_at",
                 (document_id,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        now = utc_now()
+        return [{**dict(row), "can_view": bool(row["can_view"]), "can_download": bool(row["can_download"]),
+                 "status": share_status(expires_at=row["expires_at"], revoked_at=row["revoked_at"], now=now)}
+                for row in rows]
 
     @app.delete("/api/documents/{document_id}/shares/{share_id}", status_code=204)
     async def revoke_share(document_id: str, share_id: str, user: dict = Depends(current_user)) -> Response:
@@ -268,25 +310,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if owned is None:
                 raise HTTPException(status_code=404, detail="Document not found")
             share = db.execute(
-                "SELECT u.email FROM document_shares AS s JOIN users AS u ON u.id = s.user_id "
+                "SELECT u.email, s.revoked_at FROM document_shares AS s JOIN users AS u ON u.id = s.user_id "
                 "WHERE s.id = ? AND s.document_id = ?", (share_id, document_id),
             ).fetchone()
             if share is None:
                 raise HTTPException(status_code=404, detail="Share not found")
-            db.execute("DELETE FROM document_shares WHERE id = ?", (share_id,))
+            if share["revoked_at"] is not None:
+                raise HTTPException(status_code=404, detail="Share is already revoked")
+            revoked_at = utc_now()
+            db.execute("UPDATE document_shares SET revoked_at = ? WHERE id = ?", (revoked_at, share_id))
             record_event(
                 db, event_type="document_access_revoked", actor_id=user["id"], document_id=document_id,
-                details=json.dumps({"recipient_email": share["email"]}), created_at=utc_now(),
+                details=json.dumps({"recipient_email": share["email"]}), created_at=revoked_at,
             )
         return Response(status_code=204)
 
-    def get_accessible_document(document_id: str, user_id: str) -> dict:
+    def get_accessible_document(document_id: str, user_id: str, permission: str) -> dict:
+        if permission not in {"can_view", "can_download"}:
+            raise ValueError("Invalid document permission")
         with connect(config.database_path) as db:
             row = db.execute(
                 "SELECT d.id, d.original_name, d.storage_name, d.content_type FROM documents AS d "
                 "WHERE d.id = ? AND (d.owner_id = ? OR EXISTS (SELECT 1 FROM document_shares AS s "
-                "WHERE s.document_id = d.id AND s.user_id = ?))",
-                (document_id, user_id, user_id),
+                f"WHERE s.document_id = d.id AND s.user_id = ? AND s.{permission} = 1 "
+                "AND s.revoked_at IS NULL AND (s.expires_at IS NULL OR s.expires_at > ?)))",
+                (document_id, user_id, user_id, utc_now()),
             ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Document not found")
@@ -294,7 +342,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/documents/{document_id}/view")
     async def view_document(document_id: str, user: dict = Depends(current_user)) -> Response:
-        row = get_accessible_document(document_id, user["id"])
+        row = get_accessible_document(document_id, user["id"], "can_view")
         target = config.storage_dir / row["storage_name"]
         if not target.is_file():
             raise HTTPException(status_code=404, detail="Document file not found")
@@ -308,7 +356,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/documents/{document_id}/download")
     async def download_document(document_id: str, user: dict = Depends(current_user)) -> Response:
-        row = get_accessible_document(document_id, user["id"])
+        row = get_accessible_document(document_id, user["id"], "can_download")
         target = config.storage_dir / row["storage_name"]
         if not target.is_file():
             raise HTTPException(status_code=404, detail="Document file not found")

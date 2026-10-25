@@ -1,6 +1,6 @@
 # TrustVault
 
-TrustVault is a local document-sharing prototype built with React, TypeScript, Vite, FastAPI, and SQLite. Users can create an account, sign in, upload supported files, list and view their documents, and download them. Owners can share read-only access with another existing TrustVault account by email and revoke that access later. Recent activity is also recorded.
+TrustVault is a local document-sharing prototype built with React, TypeScript, Vite, FastAPI, and SQLite. Users can create an account, sign in, upload supported files, list and view their documents, and download them. Owners can grant an existing TrustVault account separate view and download permissions, optionally set an expiry, and revoke access later. Recent activity is also recorded.
 
 ## Project layout
 
@@ -75,4 +75,4 @@ The backend tests use a fresh temporary database and local file directory for ea
 
 ## Prototype scope
 
-Sharing is limited to existing account emails. A recipient can view and download a shared document; the owner can revoke access. Admins can disable regular accounts. The prototype does not implement company/tenant isolation, fine-grained roles, CSRF defenses for cross-site deployments, encrypted-at-rest file storage, rate limiting, password reset, malware scanning, or tamper-evident audit storage. The audit table is mutable by anyone with database file access. Do not use this prototype for sensitive production documents. See [THREATS.md](THREATS.md).
+Sharing is limited to existing account emails. Owners choose whether recipients can view or download and may set an expiry. Permissions and expiry are checked by the API; revocation is immediate and retained in share history. Admins can disable regular accounts. The prototype does not implement company/tenant isolation, fine-grained roles, CSRF defenses for cross-site deployments, encrypted-at-rest file storage, rate limiting, password reset, malware scanning, or tamper-evident audit storage. The audit table is mutable by anyone with database file access. Do not use this prototype for sensitive production documents. See [THREATS.md](THREATS.md).

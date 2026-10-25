@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -155,10 +156,72 @@ async def test_share_view_download_and_revocation(tmp_path: Path) -> None:
                 f"/api/documents/{document_id}/shares/{created.json()['id']}",
             )
             assert revoked.status_code == 204
+            share_history = await owner.get(f"/api/documents/{document_id}/shares")
+            assert share_history.json()[0]["status"] == "revoked"
             assert (await recipient.get("/api/documents")).json() == []
             assert (await recipient.get(f"/api/documents/{document_id}/download")).status_code == 404
             owner_events = {item["event_type"] for item in (await owner.get("/api/audit")).json()}
             assert {"document_shared", "document_access_revoked"} <= owner_events
+
+
+@pytest.mark.anyio
+async def test_separate_permissions_and_expiry_are_enforced_by_api(tmp_path: Path) -> None:
+    settings = Settings(
+        "test-only-secret-key-with-more-than-32-bytes",
+        tmp_path / "permissions.sqlite3",
+        tmp_path / "permission-files",
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as owner, \
+                   httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as recipient:
+            await register(owner, "owner@example.com")
+            await register(recipient, "reader@example.com")
+            uploaded = await owner.post(
+                "/api/documents", files={"file": ("policy.txt", b"permission sample", "text/plain")},
+            )
+            document_id = uploaded.json()["id"]
+            expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+            view_only = await owner.post(
+                f"/api/documents/{document_id}/shares",
+                json={"email": "reader@example.com", "can_view": True, "can_download": False,
+                      "expires_at": expires_at},
+            )
+            assert view_only.status_code == 201, view_only.text
+            assert view_only.json()["can_view"] is True
+            assert view_only.json()["can_download"] is False
+            recipient_doc = (await recipient.get("/api/documents")).json()[0]
+            assert recipient_doc["can_view"] is True
+            assert recipient_doc["can_download"] is False
+            assert (await recipient.get(f"/api/documents/{document_id}/view")).status_code == 200
+            assert (await recipient.get(f"/api/documents/{document_id}/download")).status_code == 404
+
+            with connect(settings.database_path) as db:
+                db.execute(
+                    "UPDATE document_shares SET expires_at = ? WHERE document_id = ?",
+                    ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), document_id),
+                )
+            assert (await recipient.get("/api/documents")).json() == []
+            assert (await recipient.get(f"/api/documents/{document_id}/view")).status_code == 404
+            assert (await owner.get(f"/api/documents/{document_id}/shares")).json()[0]["status"] == "expired"
+
+            no_permissions = await owner.post(
+                f"/api/documents/{document_id}/shares",
+                json={"email": "reader@example.com", "can_view": False, "can_download": False},
+            )
+            assert no_permissions.status_code == 422
+            download_only = await owner.post(
+                f"/api/documents/{document_id}/shares",
+                json={"email": "reader@example.com", "can_view": False, "can_download": True},
+            )
+            assert download_only.status_code == 201, download_only.text
+            recipient_doc = (await recipient.get("/api/documents")).json()[0]
+            assert recipient_doc["can_view"] is False
+            assert recipient_doc["can_download"] is True
+            assert (await recipient.get(f"/api/documents/{document_id}/view")).status_code == 404
+            download = await recipient.get(f"/api/documents/{document_id}/download")
+            assert download.status_code == 200
+            assert download.content == b"permission sample"
 
 
 @pytest.mark.anyio
@@ -237,3 +300,44 @@ def test_database_migrates_existing_users_table(tmp_path: Path) -> None:
         row = db.execute("SELECT role, is_active FROM users WHERE id = 'existing-id'").fetchone()
     assert row["role"] == "user"
     assert row["is_active"] == 1
+
+
+def test_database_migrates_existing_share_permissions(tmp_path: Path) -> None:
+    database_path = tmp_path / "old-share-schema.sqlite3"
+    with connect(database_path) as db:
+        db.executescript(
+            """
+            CREATE TABLE users (
+                id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
+                password_hash TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE TABLE documents (
+                id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), original_name TEXT NOT NULL,
+                storage_name TEXT NOT NULL UNIQUE, content_type TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE document_shares (
+                id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id),
+                user_id TEXT NOT NULL REFERENCES users(id), granted_by TEXT NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL, UNIQUE(document_id, user_id)
+            );
+            INSERT INTO users(id, email, display_name, password_hash, created_at)
+                VALUES ('owner', 'owner@example.com', 'Owner', 'hash', '2026-01-01');
+            INSERT INTO users(id, email, display_name, password_hash, created_at)
+                VALUES ('reader', 'reader@example.com', 'Reader', 'hash', '2026-01-01');
+            INSERT INTO documents VALUES ('doc', 'owner', 'notes.txt', 'notes.txt', 'text/plain', 5, '2026-01-01');
+            INSERT INTO document_shares(id, document_id, user_id, granted_by, created_at)
+                VALUES ('share', 'doc', 'reader', 'owner', '2026-01-01');
+            """
+        )
+    from app.database import initialize_database
+
+    initialize_database(database_path)
+    with connect(database_path) as db:
+        migrated = db.execute(
+            "SELECT can_view, can_download, expires_at, revoked_at FROM document_shares WHERE id = 'share'",
+        ).fetchone()
+    assert migrated["can_view"] == 1
+    assert migrated["can_download"] == 1
+    assert migrated["expires_at"] is None
+    assert migrated["revoked_at"] is None
