@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hmac
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ from starlette.responses import FileResponse, Response
 from .config import Settings, settings_from_env
 from .database import connect, initialize_database, record_event
 from .schemas import (
-    AdminUserResponse, AuditResponse, AuthInput, DocumentResponse, ShareInput, ShareResponse,
+    AdminBootstrapInput, AdminUserResponse, AuditResponse, AuthInput, DocumentResponse, ShareInput, ShareResponse,
     UserResponse, UserStatusInput,
 )
 from .security import create_session_token, hash_password, read_session_token, verify_password
@@ -108,6 +109,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             path="/",
         )
         return {"id": user_id, "email": payload.email, "display_name": display_name, "role": "user"}
+
+    @app.post("/api/auth/bootstrap-admin", response_model=UserResponse)
+    async def bootstrap_admin(payload: AdminBootstrapInput, response: Response) -> dict:
+        bootstrap_token = config.admin_bootstrap_token
+        if bootstrap_token is None or not hmac.compare_digest(payload.bootstrap_token, bootstrap_token):
+            raise HTTPException(status_code=403, detail="The administrator setup code is invalid or disabled")
+
+        now = utc_now()
+        with connect(config.database_path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1").fetchone():
+                raise HTTPException(status_code=409, detail="An administrator has already been set up")
+
+            existing = db.execute(
+                "SELECT id, display_name, is_active FROM users WHERE email = ? COLLATE NOCASE",
+                (payload.email,),
+            ).fetchone()
+            if existing is not None and not existing["is_active"]:
+                raise HTTPException(status_code=403, detail="This account has been disabled")
+
+            if existing is not None:
+                user_id = existing["id"]
+                display_name = existing["display_name"]
+                db.execute(
+                    "UPDATE users SET role = 'admin', password_hash = ? WHERE id = ?",
+                    (hash_password(payload.password), user_id),
+                )
+            else:
+                user_id = str(uuid.uuid4())
+                display_name = (payload.display_name or payload.email.split("@", 1)[0]).strip()
+                db.execute(
+                    "INSERT INTO users(id, email, display_name, password_hash, created_at, role, is_active) "
+                    "VALUES (?, ?, ?, ?, ?, 'admin', 1)",
+                    (user_id, payload.email, display_name, hash_password(payload.password), now),
+                )
+            record_event(
+                db, event_type="first_administrator_bootstrapped", actor_id=user_id,
+                details=json.dumps({"email": payload.email}), created_at=now,
+            )
+
+        response.set_cookie(
+            config.cookie_name, create_session_token(user_id, config.secret_key, config.session_hours),
+            httponly=True, secure=config.cookie_secure, samesite="lax", max_age=config.session_hours * 3600,
+            path="/",
+        )
+        return {"id": user_id, "email": payload.email, "display_name": display_name, "role": "admin"}
 
     @app.post("/api/auth/login", response_model=UserResponse)
     async def login(payload: AuthInput, response: Response) -> dict:

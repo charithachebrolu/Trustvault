@@ -22,6 +22,10 @@ class AuthInput(BaseModel):
         return value
 
 
+class AdminBootstrapInput(AuthInput):
+    bootstrap_token: str = Field(min_length=32, max_length=512)
+
+
 class UserResponse(BaseModel):
     id: str
     email: str

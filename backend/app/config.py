@@ -19,6 +19,7 @@ class Settings:
     cookie_name: str = "trustvault_session"
     session_hours: int = 8
     cors_origins: tuple[str, ...] = ("http://localhost:5173",)
+    admin_bootstrap_token: str | None = None
 
 
 def settings_from_env() -> Settings:
@@ -54,4 +55,5 @@ def settings_from_env() -> Settings:
         cookie_secure=os.getenv("TRUSTVAULT_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"},
         session_hours=int(os.getenv("TRUSTVAULT_SESSION_HOURS", "8")),
         cors_origins=origins,
+        admin_bootstrap_token=os.getenv("TRUSTVAULT_ADMIN_BOOTSTRAP_TOKEN", "").strip() or None,
     )

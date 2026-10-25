@@ -12,6 +12,8 @@ services:
     envVars:
       - key: TRUSTVAULT_SECRET_KEY
         generateValue: true
+      - key: TRUSTVAULT_ADMIN_BOOTSTRAP_TOKEN
+        generateValue: true
       - key: TRUSTVAULT_DATABASE_PATH
         value: /tmp/trustvault.db
       - key: TRUSTVAULT_STORAGE_DIR
